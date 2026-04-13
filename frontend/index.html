@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Dijkstra Perú</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; }
+    #map { width: 100%; height: 100%; }
+
+    /* Autocomplete inputs flotantes sobre el mapa */
+    #controls {
+      position: absolute;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(15,15,20,0.88);
+      backdrop-filter: blur(12px);
+      padding: 10px 14px;
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,0.08);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      min-width: 580px;
+    }
+
+    .input-wrap {
+      position: relative;
+      flex: 1;
+    }
+
+    .input-icon {
+      position: absolute;
+      left: 10px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 14px;
+      pointer-events: none;
+    }
+
+    .pac-input {
+      width: 100%;
+      padding: 9px 10px 9px 30px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.07);
+      color: #f0f0f0;
+      font-size: 13px;
+      font-family: 'Segoe UI', sans-serif;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .pac-input::placeholder { color: rgba(255,255,255,0.35); }
+    .pac-input:focus { border-color: rgba(80,180,255,0.6); background: rgba(255,255,255,0.1); }
+
+    .arrow { color: rgba(255,255,255,0.3); font-size: 16px; }
+
+    #btn-calcular {
+      padding: 9px 18px;
+      border-radius: 8px;
+      border: none;
+      background: linear-gradient(135deg, #1a6cf0, #0e4bbf);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
+      font-family: 'Segoe UI', sans-serif;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
+      white-space: nowrap;
+    }
+    #btn-calcular:hover { opacity: 0.9; }
+    #btn-calcular:active { transform: scale(0.97); }
+    #btn-calcular:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    /* Panel de estado */
+    #status-panel {
+      position: absolute;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      background: rgba(15,15,20,0.88);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px;
+      padding: 10px 20px;
+      color: #e0e0e0;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 13px;
+      display: none;
+      align-items: center;
+      gap: 10px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    }
+    #status-panel.visible { display: flex; }
+    #status-panel.error { border-color: rgba(255,80,80,0.4); color: #ff8080; }
+    #status-panel.success { border-color: rgba(60,200,120,0.4); color: #5de8a0; }
+
+    .spinner {
+      width: 16px; height: 16px;
+      border: 2px solid rgba(255,255,255,0.15);
+      border-top-color: #50b4ff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Override estilos del dropdown de Google Autocomplete */
+    .pac-container {
+      border-radius: 10px !important;
+      border: 1px solid rgba(255,255,255,0.1) !important;
+      background: #1a1a24 !important;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.6) !important;
+      font-family: 'Segoe UI', sans-serif !important;
+    }
+    .pac-item { color: #ccc !important; border-top: 1px solid rgba(255,255,255,0.05) !important; padding: 8px 12px !important; cursor: pointer; }
+    .pac-item:hover { background: rgba(255,255,255,0.06) !important; }
+    .pac-item-query { color: #eee !important; }
+    .pac-matched { color: #50b4ff !important; }
+  </style>
+</head>
+<body>
+
+<!-- Mapa -->
+<div id="map"></div>
+
+<!-- Controles superpuestos -->
+<div id="controls">
+  <div class="input-wrap">
+    <span class="input-icon">🟢</span>
+    <input id="input-origin" class="pac-input" type="text" placeholder="Ciudad de origen..." autocomplete="off"/>
+  </div>
+  <span class="arrow">→</span>
+  <div class="input-wrap">
+    <span class="input-icon">🔴</span>
+    <input id="input-dest" class="pac-input" type="text" placeholder="Ciudad de destino..." autocomplete="off"/>
+  </div>
+  <button id="btn-calcular" onclick="requestRoute()">Calcular ruta</button>
+</div>
+
+<!-- Panel de estado / resultados -->
+<div id="status-panel">
+  <div class="spinner" id="spinner"></div>
+  <span id="status-text">Calculando ruta con Dijkstra...</span>
+</div>
+
+<!-- QWebChannel para comunicación con Python -->
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+
+<script>
+  // ─── Estado global ────────────────────────────────────────────────────────
+  let map, originMarker, destMarker, routePolyline;
+  let originPlace = null;
+  let destPlace   = null;
+  let bridge      = null;   // Objeto Python expuesto via QWebChannel
+
+  // ─── Inicializar QWebChannel (puente Python↔JS) ────────────────────────
+  function initBridge() {
+    if (typeof QWebChannel === 'undefined') {
+      console.warn("QWebChannel no disponible");
+      return;
+    }
+    new QWebChannel(qt.webChannelTransport, function(channel) {
+      bridge = channel.objects.bridge;
+      console.log("Bridge Python conectado ✓");
+
+      // Escuchar respuesta de Python con la ruta calculada
+      bridge.routeReady.connect(function(routeJson) {
+        handleRouteResult(routeJson);
+      });
+    });
+  }
+
+  // ─── Inicializar Google Maps ───────────────────────────────────────────
+  function initMap() {
+    map = new google.maps.Map(document.getElementById("map"), {
+      center: { lat: -9.19, lng: -75.0152 },   // Centro del Perú
+      zoom: 6,
+      mapTypeId: "roadmap",
+      styles: darkMapStyle(),
+      disableDefaultUI: false,
+      zoomControl: true,
+      mapTypeControl: false,
+      streetViewControl: false,
+      fullscreenControl: false,
+    });
+
+    setupAutocomplete();
+    initBridge();
+  }
+
+  // ─── Autocomplete ─────────────────────────────────────────────────────
+  function setupAutocomplete() {
+    const options = {
+      componentRestrictions: { country: "pe" },
+      fields: ["geometry", "name", "place_id"],
+    };
+
+    const acOrigin = new google.maps.places.Autocomplete(
+      document.getElementById("input-origin"), options
+    );
+    const acDest = new google.maps.places.Autocomplete(
+      document.getElementById("input-dest"), options
+    );
+
+    acOrigin.addListener("place_changed", () => {
+      const place = acOrigin.getPlace();
+      if (place.geometry) {
+        originPlace = {
+          lat: place.geometry.location.lat(),
+          lon: place.geometry.location.lng(),
+          name: place.name,
+          place_id: place.place_id,
+        };
+        placeMarker("origin", originPlace.lat, originPlace.lon, place.name);
+        fitBounds();
+      }
+    });
+
+    acDest.addListener("place_changed", () => {
+      const place = acDest.getPlace();
+      if (place.geometry) {
+        destPlace = {
+          lat: place.geometry.location.lat(),
+          lon: place.geometry.location.lng(),
+          name: place.name,
+          place_id: place.place_id,
+        };
+        placeMarker("dest", destPlace.lat, destPlace.lon, place.name);
+        fitBounds();
+      }
+    });
+  }
+
+  // ─── Marcadores ───────────────────────────────────────────────────────
+  function placeMarker(type, lat, lon, label) {
+    const pos = { lat, lng: lon };
+    if (type === "origin") {
+      if (originMarker) originMarker.setMap(null);
+      originMarker = new google.maps.Marker({
+        position: pos, map,
+        title: label,
+        icon: { url: "https://maps.google.com/mapfiles/ms/icons/green-dot.png" }
+      });
+    } else {
+      if (destMarker) destMarker.setMap(null);
+      destMarker = new google.maps.Marker({
+        position: pos, map,
+        title: label,
+        icon: { url: "https://maps.google.com/mapfiles/ms/icons/red-dot.png" }
+      });
+    }
+  }
+
+  function fitBounds() {
+    if (!originPlace || !destPlace) return;
+    const bounds = new google.maps.LatLngBounds();
+    bounds.extend({ lat: originPlace.lat, lng: originPlace.lon });
+    bounds.extend({ lat: destPlace.lat,   lng: destPlace.lon   });
+    map.fitBounds(bounds, { top: 80, bottom: 60, left: 40, right: 40 });
+  }
+
+  // ─── Solicitar ruta a Python ───────────────────────────────────────────
+  function requestRoute() {
+    if (!originPlace || !destPlace) {
+      showStatus("Selecciona origen y destino primero.", "error");
+      return;
+    }
+    if (!bridge) {
+      showStatus("Conexión con Python no lista.", "error");
+      return;
+    }
+
+    showStatus("Descargando grafo OSMnx y calculando Dijkstra...", "loading");
+    document.getElementById("btn-calcular").disabled = true;
+
+    const payload = JSON.stringify({
+      origin_lat: originPlace.lat,
+      origin_lon: originPlace.lon,
+      dest_lat:   destPlace.lat,
+      dest_lon:   destPlace.lon,
+      origin_name: originPlace.name,
+      dest_name:   destPlace.name,
+    });
+
+    bridge.calculateRoute(payload);
+  }
+
+  // ─── Recibir resultado de Python y dibujar ruta ────────────────────────
+  function handleRouteResult(routeJson) {
+    document.getElementById("btn-calcular").disabled = false;
+
+    let result;
+    try { result = JSON.parse(routeJson); } catch(e) {
+      showStatus("Error al procesar respuesta.", "error");
+      return;
+    }
+
+    if (!result.success) {
+      showStatus("❌ " + result.error, "error");
+      return;
+    }
+
+    drawRoute(result.coordinates);
+    showStatus(
+      `✓ Ruta calculada · ${result.distance_km} km · ${result.nodes_count} nodos`,
+      "success"
+    );
+  }
+
+  // ─── Dibujar la polilínea real de la ruta ─────────────────────────────
+  function drawRoute(coordinates) {
+    if (routePolyline) routePolyline.setMap(null);
+
+    const path = coordinates.map(c => ({ lat: c[0], lng: c[1] }));
+
+    routePolyline = new google.maps.Polyline({
+      path,
+      geodesic: true,
+      strokeColor: "#2979ff",
+      strokeOpacity: 0.9,
+      strokeWeight: 5,
+      map,
+    });
+
+    // Ajustar vista a la ruta
+    const bounds = new google.maps.LatLngBounds();
+    path.forEach(p => bounds.extend(p));
+    map.fitBounds(bounds, { top: 80, bottom: 60, left: 40, right: 40 });
+  }
+
+  // ─── Panel de estado ──────────────────────────────────────────────────
+  function showStatus(msg, type) {
+    const panel   = document.getElementById("status-panel");
+    const text    = document.getElementById("status-text");
+    const spinner = document.getElementById("spinner");
+
+    panel.className = "visible";
+    text.textContent = msg;
+    spinner.style.display = type === "loading" ? "block" : "none";
+
+    if (type === "error")   panel.classList.add("error");
+    else panel.classList.remove("error");
+
+    if (type === "success") panel.classList.add("success");
+    else panel.classList.remove("success");
+  }
+
+  // ─── Estilo oscuro del mapa ───────────────────────────────────────────
+  function darkMapStyle() {
+    return [
+      { elementType: "geometry",      stylers: [{ color: "#1a1a2e" }] },
+      { elementType: "labels.text.stroke", stylers: [{ color: "#1a1a2e" }] },
+      { elementType: "labels.text.fill",   stylers: [{ color: "#8899aa" }] },
+      { featureType: "road",          elementType: "geometry", stylers: [{ color: "#2d3748" }] },
+      { featureType: "road",          elementType: "geometry.stroke", stylers: [{ color: "#1a202c" }] },
+      { featureType: "road.highway",  elementType: "geometry", stylers: [{ color: "#2b4590" }] },
+      { featureType: "water",         elementType: "geometry", stylers: [{ color: "#0d2137" }] },
+      { featureType: "poi",           stylers: [{ visibility: "off" }] },
+      { featureType: "transit",       stylers: [{ visibility: "off" }] },
+      { featureType: "administrative.country", elementType: "geometry.stroke", stylers: [{ color: "#3a4a6b" }] },
+    ];
+  }
+</script>
+
+<!-- Cargar Google Maps (la API Key se inyecta desde Python) -->
+<script id="gmaps-script"></script>
+
+<script>
+  // Inyectar la API key dinámicamente (viene desde Python via URL o meta tag)
+  (function() {
+    const apiKey = document.querySelector('meta[name="gmaps-key"]')?.content || "";
+    const script = document.getElementById("gmaps-script");
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places&callback=initMap`;
+    script.async = true;
+    script.defer = true;
+  })();
+</script>
+
+</body>
+</html>
